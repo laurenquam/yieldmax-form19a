@@ -1,14 +1,12 @@
 import requests
 import time
 import csv
-import io
 import re
-import pdfplumber
-from datetime import datetime
 
 # ====================================================
 # CONFIG
 # ====================================================
+CIK = "0001980842"   # YieldMax Option Income ETF Trust
 OUTPUT_FILE = "form19a_enriched.csv"
 
 HEADERS = {
@@ -16,87 +14,81 @@ HEADERS = {
     "Accept-Encoding": "identity"
 }
 
-FORM_19A_GROUPS = [
-    {
-        "group": "Group 1",
-        "pdf_url": "https://yieldmaxetfs.com/wp-content/uploads/TaxDocuments/Group_1_Supplemental%20and%20Tax%20IRS%20Form%208937/YieldMax%2019a-1%20Notice%2011.13.25%20Payable%20-%20Group%201.pdf",
-        "tickers": ["ULTY"]
-    },
-    {
-        "group": "Group 2",
-        # ⚠️ URL MAY NOT EXIST YET — EXPECTED
-        "pdf_url": "https://yieldmaxetfs.com/wp-content/uploads/TaxDocuments/Group_2_Supplemental%20and%20Tax%20IRS%20Form%208937/YieldMax%2019a-1%20Notice%2011.13.25%20Payable%20-%20Group%202.pdf",
-        "tickers": ["MSTY"]
-    }
+# Map fund names (as they appear in filings) to tickers
+FUND_NAME_MAP = {
+    "YieldMax MSTR Option Income ETF": "MSTY",
+    "YieldMax Ultra Option Income ETF": "ULTY",
+}
+
+# Keywords that positively identify a 19a-1 notice
+FORM_19A_KEYWORDS = [
+    "rule 19a-1",
+    "19a-1",
+    "section 19(a)"
 ]
 
 # ====================================================
 # HELPERS
 # ====================================================
-def try_fetch_pdf(url):
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=30)
-        if r.status_code == 404:
-            print(f"⚠️ PDF not found (404): {url}")
-            return None
-        r.raise_for_status()
-        time.sleep(0.5)
-        return r.content
-    except Exception as e:
-        print(f"⚠️ Failed to fetch PDF: {e}")
-        return None
+def fetch_json(url):
+    r = requests.get(url, headers=HEADERS, timeout=30)
+    r.raise_for_status()
+    time.sleep(0.25)
+    return r.json()
 
-def extract_text(pdf_bytes):
-    text = ""
-    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-        for page in pdf.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + "\n"
-    return text
-
-def parse_date(text):
-    try:
-        return datetime.strptime(text.strip(), "%B %d, %Y").date().isoformat()
-    except:
-        return ""
+def fetch_text(url):
+    r = requests.get(url, headers=HEADERS, timeout=30)
+    r.raise_for_status()
+    time.sleep(0.25)
+    return r.text.lower()
 
 # ====================================================
 # MAIN
 # ====================================================
 rows = []
 
-for group in FORM_19A_GROUPS:
-    print(f"\nProcessing {group['group']}")
+print("Fetching EDGAR submissions index...")
+submissions = fetch_json(
+    f"https://data.sec.gov/submissions/CIK{CIK}.json"
+)
 
-    pdf_bytes = try_fetch_pdf(group["pdf_url"])
-    if not pdf_bytes:
-        print(f"Skipping {group['group']} — PDF unavailable")
+recent = submissions["filings"]["recent"]
+
+for i, form in enumerate(recent["form"]):
+    accession = recent["accessionNumber"][i].replace("-", "")
+    primary_doc = recent["primaryDocument"][i]
+    filing_date = recent["filingDate"][i]
+
+    filing_url = (
+        f"https://www.sec.gov/Archives/edgar/data/"
+        f"{int(CIK)}/{accession}/{primary_doc}"
+    )
+
+    try:
+        text = fetch_text(filing_url)
+    except Exception as e:
+        print(f"Skipping (fetch failed): {filing_url}")
         continue
 
-    text = extract_text(pdf_bytes)
+    # ------------------------------------------------
+    # Content-based detection of Form 19a-1
+    # ------------------------------------------------
+    if not any(k in text for k in FORM_19A_KEYWORDS):
+        continue
 
-    payable_match = re.search(
-        r"Payable Date[:\s]*([A-Za-z]+\s+\d{1,2},\s+\d{4})",
-        text,
-        re.IGNORECASE
-    )
-    distribution_date = parse_date(payable_match.group(1)) if payable_match else ""
+    print(f"Detected 19a-1 content: {filing_url}")
 
-    for line in text.splitlines():
-        for ticker in group["tickers"]:
-            if ticker not in line:
-                continue
-
-            pcts = re.findall(r"([0-9]{1,3}\.\d+)%", line)
-            roc = float(pcts[-1]) / 100 if pcts else ""
-
+    # ------------------------------------------------
+    # Identify which ETF(s) are referenced
+    # ------------------------------------------------
+    for fund_name, ticker in FUND_NAME_MAP.items():
+        if fund_name.lower() in text:
             rows.append([
                 ticker,
-                distribution_date,
-                "",
-                roc,
-                group["pdf_url"]
+                filing_date,     # authoritative filing date
+                "",              # ex-div (joined later)
+                "",              # ROC (added later if available)
+                filing_url
             ])
 
 # ====================================================
@@ -113,4 +105,5 @@ with open(OUTPUT_FILE, "w", newline="", encoding="utf-8") as f:
     ])
     writer.writerows(rows)
 
-print(f"\nSUCCESS — wrote {len(rows)} rows to {OUTPUT_FILE}")
+print(f"SUCCESS — wrote {len(rows)} rows to {OUTPUT_FILE}")
+

@@ -38,17 +38,20 @@ def parse_date(text):
     except Exception:
         return None
 
+def parse_float(text):
+    try:
+        return float(text.replace("$", "").strip())
+    except Exception:
+        return None
+
 def parse_pct(text):
     try:
         return float(text.replace("%", "").strip()) / 100
     except Exception:
         return None
 
-def parse_float(text):
-    try:
-        return float(text.replace("$", "").strip())
-    except Exception:
-        return None
+def normalize_header(text):
+    return re.sub(r"[^a-z0-9]", "", text.lower())
 
 # ====================================================
 # YAHOO DIVIDENDS (VALIDATION ONLY)
@@ -73,16 +76,16 @@ def yahoo_dividends(ticker, start_date, end_date):
         return []
 
     events = data[0].get("events", {}).get("dividends", {})
-    out = []
-    for v in events.values():
-        out.append({
+    return [
+        {
             "date": datetime.fromtimestamp(v["date"]).date(),
             "amount": float(v["amount"])
-        })
-    return out
+        }
+        for v in events.values()
+    ]
 
 # ====================================================
-# RELEASE-LEVEL METADATA
+# RELEASE METADATA (BEST EFFORT)
 # ====================================================
 def extract_release_metadata(text):
     def grab(patterns):
@@ -106,7 +109,7 @@ def extract_release_metadata(text):
     }
 
 # ====================================================
-# STEP 1 — DISCOVER YIELDMAX POSTS (BROAD)
+# STEP 1 — DISCOVER YIELDMAX POSTS
 # ====================================================
 print("Discovering YieldMax news posts…")
 
@@ -149,10 +152,10 @@ globe_urls = list(dict.fromkeys(globe_urls))
 print(f"Discovered {len(globe_urls)} GlobeNewswire releases")
 
 # ====================================================
-# STEP 3 — PARSE GLOBENEWSWIRE TABLES
+# STEP 3 — PARSE TABLES
 # ====================================================
 rows = []
-yieldmax_keys = set()  # (ticker, ex_date)
+yieldmax_keys = set()  # (ticker, payment_date)
 
 for url in globe_urls:
     html = fetch_html(url)
@@ -167,21 +170,25 @@ for url in globe_urls:
     group = "Group 1" if "GROUP 1" in title else "Group 2" if "GROUP 2" in title else ""
 
     meta = extract_release_metadata(body_text)
+    payment_date = meta["payment_date"]
+    ex_date = meta["ex_date"]
+    record_date = meta["record_date"]
 
     table = soup.find("table")
     if not table:
         continue
 
-    headers = [th.get_text(strip=True).lower() for th in table.find_all("th")]
+    headers = [normalize_header(th.get_text(strip=True)) for th in table.find_all("th")]
     header_map = {h: i for i, h in enumerate(headers)}
 
     def col(*names):
         for n in names:
-            if n.lower() in header_map:
-                return header_map[n.lower()]
+            key = normalize_header(n)
+            if key in header_map:
+                return header_map[key]
         return None
 
-    idx_div = col("distribution amount", "distribution", "dividend")
+    idx_div = col("distribution", "distribution amount", "cash distribution")
     idx_rate = col("distribution rate")
     idx_sec = col("30-day sec yield", "30 day sec yield")
     roc_idx = len(headers) - 1
@@ -205,11 +212,7 @@ for url in globe_urls:
         sec_yield = parse_pct(cells[idx_sec]) if idx_sec is not None else None
         roc = parse_pct(cells[roc_idx])
 
-        ex_date = meta["ex_date"]
-        payment_date = meta["payment_date"]
-        record_date = meta["record_date"]
-
-        yieldmax_keys.add((ticker, ex_date))
+        yieldmax_keys.add((ticker, payment_date))
 
         yahoo_date = None
         yahoo_amt = None
@@ -217,12 +220,12 @@ for url in globe_urls:
 
         anchor = ex_date or payment_date
         if anchor:
-            y_events = yahoo_dividends(
+            events = yahoo_dividends(
                 ticker,
                 anchor - timedelta(days=YAHOO_TOLERANCE_DAYS),
                 anchor + timedelta(days=YAHOO_TOLERANCE_DAYS)
             )
-            for ev in y_events:
+            for ev in events:
                 if dividend is not None and abs(ev["amount"] - dividend) <= AMOUNT_TOLERANCE:
                     yahoo_date = ev["date"]
                     yahoo_amt = ev["amount"]
@@ -246,7 +249,7 @@ for url in globe_urls:
         ])
 
 # ====================================================
-# STEP 4 — COMPLETENESS (YAHOO-ANCHOR)
+# STEP 4 — COMPLETENESS CHECK (YAHOO-ANCHOR)
 # ====================================================
 for ticker in TARGET_TICKERS:
     all_yahoo = yahoo_dividends(
@@ -255,12 +258,12 @@ for ticker in TARGET_TICKERS:
         datetime.today().date()
     )
     for ev in all_yahoo:
-        if (ticker, ev["date"]) not in yieldmax_keys:
+        if (ticker, None) not in yieldmax_keys:
             rows.append([
                 ticker,
                 None,
                 None,
-                ev["date"],
+                None,
                 None,
                 None,
                 None,

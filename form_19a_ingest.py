@@ -3,6 +3,7 @@ import csv
 import time
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
+from urllib.parse import urljoin
 
 # ====================================================
 # CONFIG
@@ -15,11 +16,9 @@ HEADERS = {
 }
 
 TARGET_TICKERS = {"ULTY", "MSTY"}
-
 YIELDMAX_NEWS_INDEX = "https://yieldmaxetfs.com/news/"
 
-# Yahoo validation window (days around payable date)
-YAHOO_DATE_TOLERANCE = 3
+YAHOO_DATE_TOLERANCE = 3  # days
 
 # ====================================================
 # HELPERS
@@ -27,7 +26,7 @@ YAHOO_DATE_TOLERANCE = 3
 def fetch_html(url):
     r = requests.get(url, headers=HEADERS, timeout=30)
     r.raise_for_status()
-    time.sleep(0.2)
+    time.sleep(0.25)
     return r.text
 
 def parse_date(text):
@@ -43,9 +42,6 @@ def parse_pct(text):
         return ""
 
 def yahoo_dividends(ticker, start, end):
-    """
-    Returns list of dividend dates from Yahoo Finance
-    """
     url = (
         f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}"
         f"?period1={int(start.timestamp())}"
@@ -64,37 +60,53 @@ def yahoo_dividends(ticker, start, end):
     return [datetime.fromtimestamp(v["date"]).date() for v in events.values()]
 
 # ====================================================
-# STEP 1 — AUTO-DISCOVER GLOBENEWSWIRE LINKS
+# STEP 1 — DISCOVER YIELDMAX NEWS POSTS
 # ====================================================
-print("Discovering YieldMax distribution releases…")
+print("Discovering YieldMax news posts…")
 
 index_html = fetch_html(YIELDMAX_NEWS_INDEX)
 index_soup = BeautifulSoup(index_html, "html.parser")
 
-release_urls = []
+yieldmax_posts = []
 
 for a in index_soup.find_all("a", href=True):
+    title = a.get_text(strip=True)
     href = a["href"]
-    text = a.get_text(strip=True)
 
     if (
-        "Weekly Distributions" in text
-        and "Group" in text
-        and "globenewswire.com" in href
+        "Weekly Distributions" in title
+        and "Group" in title
     ):
-        release_urls.append(href)
+        full_url = urljoin(YIELDMAX_NEWS_INDEX, href)
+        yieldmax_posts.append(full_url)
 
-release_urls = list(dict.fromkeys(release_urls))  # de-dupe
-
-print(f"Discovered {len(release_urls)} release URLs")
+yieldmax_posts = list(dict.fromkeys(yieldmax_posts))
+print(f"Found {len(yieldmax_posts)} YieldMax news posts")
 
 # ====================================================
-# STEP 2 — PARSE EACH RELEASE (BACKFILL)
+# STEP 2 — EXTRACT GLOBENEWSWIRE LINKS
+# ====================================================
+globe_urls = []
+
+for post_url in yieldmax_posts:
+    print(f"Scanning YieldMax post: {post_url}")
+    post_html = fetch_html(post_url)
+    post_soup = BeautifulSoup(post_html, "html.parser")
+
+    for a in post_soup.find_all("a", href=True):
+        if "globenewswire.com" in a["href"]:
+            globe_urls.append(a["href"])
+
+globe_urls = list(dict.fromkeys(globe_urls))
+print(f"Discovered {len(globe_urls)} GlobeNewswire releases")
+
+# ====================================================
+# STEP 3 — PARSE GLOBENEWSWIRE TABLES
 # ====================================================
 rows = []
 
-for url in release_urls:
-    print(f"Processing release: {url}")
+for url in globe_urls:
+    print(f"Processing GlobeNewswire release: {url}")
     html = fetch_html(url)
     soup = BeautifulSoup(html, "html.parser")
 
@@ -124,15 +136,11 @@ for url in release_urls:
         dividend = row.get("Distribution Amount", "")
         roc = parse_pct(cells[roc_idx])
 
-        # ====================================================
-        # STEP 3 — YAHOO VALIDATION
-        # ====================================================
         yahoo_match = ""
         if payable:
             start = payable - timedelta(days=YAHOO_DATE_TOLERANCE)
             end = payable + timedelta(days=YAHOO_DATE_TOLERANCE)
-            ydates = yahoo_dividends(ticker, start, end)
-            yahoo_match = "Yes" if ydates else "No"
+            yahoo_match = "Yes" if yahoo_dividends(ticker, start, end) else "No"
 
         rows.append([
             ticker,
@@ -146,7 +154,7 @@ for url in release_urls:
         ])
 
 # ====================================================
-# WRITE CSV (ALWAYS REBUILT)
+# WRITE CSV
 # ====================================================
 with open(OUTPUT_FILE, "w", newline="", encoding="utf-8") as f:
     writer = csv.writer(f)

@@ -1,23 +1,21 @@
 import requests
 import time
 import csv
-import re
+from bs4 import BeautifulSoup
 from datetime import datetime
 
 # ====================================================
-# CONFIGURATION
+# CONFIG
 # ====================================================
-CIK = "0001980842"   # YieldMax Option Income ETF Trust
+CIK = "0001980842"   # YieldMax Trust
 OUTPUT_FILE = "form19a_enriched.csv"
 
 USER_AGENT = "ETF Dividend Research Tool (manual ingestion)"
-
 HEADERS = {
     "User-Agent": USER_AGENT,
     "Accept-Encoding": "identity"
 }
 
-# Map exact fund names as they appear in Form 19a-1
 ETF_MAP = {
     "YieldMax™ MSTR Option Income ETF": "MSTY",
     "YieldMax™ Ultra Option Income ETF": "ULTY"
@@ -32,36 +30,30 @@ def fetch_json(url):
     time.sleep(0.5)
     return r.json()
 
-def fetch_text(url):
+def fetch_html(url):
     r = requests.get(url, headers=HEADERS, timeout=30)
     r.raise_for_status()
     time.sleep(0.5)
     return r.text
 
-def parse_date(text):
-    """
-    Converts 'September 27, 2024' → '2024-09-27'
-    """
+def parse_date_safe(text):
     try:
         return datetime.strptime(text.strip(), "%B %d, %Y").date().isoformat()
     except Exception:
         return ""
 
 # ====================================================
-# STEP 1: LOAD TRUST SUBMISSIONS
+# LOAD TRUST SUBMISSIONS
 # ====================================================
-print("Fetching submissions index…")
-
-submissions_url = f"https://data.sec.gov/submissions/CIK{CIK}.json"
-submissions = fetch_json(submissions_url)
+submissions = fetch_json(
+    f"https://data.sec.gov/submissions/CIK{CIK}.json"
+)
 
 recent = submissions["filings"]["recent"]
-
 rows = []
-processed_filings = 0
 
 # ====================================================
-# STEP 2: LOOP FORM 19A FILINGS
+# LOOP FORM 19A FILINGS
 # ====================================================
 for i, form in enumerate(recent["form"]):
     if "19A" not in form.upper():
@@ -69,68 +61,52 @@ for i, form in enumerate(recent["form"]):
 
     accession = recent["accessionNumber"][i].replace("-", "")
     primary_doc = recent["primaryDocument"][i]
+    filing_date = recent["filingDate"][i]
 
     filing_url = (
         f"https://www.sec.gov/Archives/edgar/data/"
         f"{int(CIK)}/{accession}/{primary_doc}"
     )
 
-    print(f"Processing filing: {filing_url}")
-    processed_filings += 1
+    print(f"Processing: {filing_url}")
 
-    try:
-        text = fetch_text(filing_url)
-    except Exception as e:
-        print(f"Failed to fetch filing text: {e}")
+    html = fetch_html(filing_url)
+    soup = BeautifulSoup(html, "html.parser")
+
+    tables = soup.find_all("table")
+    if not tables:
         continue
 
-    # ====================================================
-    # STEP 3: PARSE EACH ETF BLOCK
-    # ====================================================
-    for fund_name, ticker in ETF_MAP.items():
-        if fund_name not in text:
-            continue
+    for table in tables:
+        rows_html = table.find_all("tr")
+        for tr in rows_html:
+            cells = [c.get_text(strip=True) for c in tr.find_all(["td", "th"])]
+            if len(cells) < 3:
+                continue
 
-        dist_match = re.search(
-            r"Distribution Date[:\s]*([A-Za-z]+\s+\d{1,2},\s+\d{4})",
-            text,
-            re.IGNORECASE
-        )
+            for fund_name, ticker in ETF_MAP.items():
+                if fund_name not in cells[0]:
+                    continue
 
-        ex_match = re.search(
-            r"Ex[- ]Dividend Date[:\s]*([A-Za-z]+\s+\d{1,2},\s+\d{4})",
-            text,
-            re.IGNORECASE
-        )
+                roc_value = ""
+                for c in cells:
+                    if "%" in c:
+                        try:
+                            roc_value = float(c.replace("%", "")) / 100
+                        except:
+                            pass
 
-        roc_match = re.search(
-            r"return of capital[^0-9]*([0-9]{1,3}\.?[0-9]*)\s*%",
-            text,
-            re.IGNORECASE
-        )
-
-        if not dist_match:
-            print(f"⚠️ No distribution date found for {ticker} in this filing")
-            continue
-
-        distribution_date = parse_date(dist_match.group(1))
-        ex_div_date = parse_date(ex_match.group(1)) if ex_match else ""
-        roc_pct = float(roc_match.group(1)) / 100 if roc_match else ""
-
-        rows.append([
-            ticker,
-            distribution_date,
-            ex_div_date,
-            roc_pct,
-            filing_url
-        ])
+                rows.append([
+                    ticker,
+                    filing_date,   # Distribution date proxy
+                    "",             # Ex-div (still blank)
+                    roc_value,
+                    filing_url
+                ])
 
 # ====================================================
-# STEP 4: WRITE CSV
+# WRITE CSV (ALWAYS)
 # ====================================================
-print(f"Processed {processed_filings} Form 19a-1 filings")
-print(f"Writing {len(rows)} rows to {OUTPUT_FILE}")
-
 with open(OUTPUT_FILE, "w", newline="", encoding="utf-8") as f:
     writer = csv.writer(f)
     writer.writerow([
@@ -142,4 +118,4 @@ with open(OUTPUT_FILE, "w", newline="", encoding="utf-8") as f:
     ])
     writer.writerows(rows)
 
-print("CSV write complete")
+print(f"Wrote {len(rows)} rows to {OUTPUT_FILE}")

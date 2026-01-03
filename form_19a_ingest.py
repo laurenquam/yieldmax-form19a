@@ -18,7 +18,7 @@ HEADERS = {
 
 TARGET_TICKERS = {"ULTY", "MSTY"}
 YIELDMAX_NEWS_INDEX = "https://yieldmaxetfs.com/news/"
-YAHOO_DATE_TOLERANCE = 3
+YAHOO_DATE_TOLERANCE = 3  # days
 
 # ====================================================
 # HELPERS
@@ -41,6 +41,12 @@ def parse_pct(text):
     except:
         return ""
 
+def extract_ticker_from_cells(cells):
+    for cell in cells:
+        if cell in TARGET_TICKERS:
+            return cell
+    return None
+
 def yahoo_dividends(ticker, start, end):
     url = (
         f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}"
@@ -59,14 +65,25 @@ def yahoo_dividends(ticker, start, end):
     events = data[0].get("events", {}).get("dividends", {})
     return [datetime.fromtimestamp(v["date"]).date() for v in events.values()]
 
-def extract_ticker_from_cells(cells):
+def extract_header_fields(text):
     """
-    Safely find ticker symbol in a row
+    Extract metadata fields that appear above the table
     """
-    for cell in cells:
-        if cell in TARGET_TICKERS:
-            return cell
-    return None
+    def grab(label):
+        m = re.search(label + r"\s*:\s*([A-Za-z]+\s+\d{1,2},\s+\d{4})", text)
+        return parse_date(m.group(1)) if m else None
+
+    def grab_pct(label):
+        m = re.search(label + r"\s*:\s*([0-9.]+%)", text)
+        return parse_pct(m.group(1)) if m else ""
+
+    return {
+        "payment_date": grab("Payment Date"),
+        "ex_date": grab("Ex-Date"),
+        "record_date": grab("Record Date"),
+        "distribution_rate": grab_pct("Distribution Rate"),
+        "sec_30_day_yield": grab_pct("30-Day SEC Yield"),
+    }
 
 # ====================================================
 # STEP 1 — DISCOVER YIELDMAX NEWS POSTS
@@ -115,10 +132,11 @@ for url in globe_urls:
 
     title = soup.find("h1").get_text(strip=True)
     group = "Group 1" if "Group 1" in title else "Group 2" if "Group 2" in title else ""
-
-    # Only care about Group 1 / Group 2 releases
     if not group:
         continue
+
+    full_text = soup.get_text(" ", strip=True)
+    meta = extract_header_fields(full_text)
 
     table = soup.find("table")
     if not table:
@@ -129,8 +147,6 @@ for url in globe_urls:
 
     for tr in table.find_all("tr"):
         cells = [td.get_text(strip=True) for td in tr.find_all("td")]
-
-        # 🔒 DEFENSIVE GUARD
         if len(cells) < 4:
             continue
 
@@ -138,39 +154,43 @@ for url in globe_urls:
         if not ticker:
             continue
 
-        payable = parse_date(cells[-3])
-        ex_date = parse_date(cells[-4])
         dividend = cells[-5] if len(cells) >= 5 else ""
         roc = parse_pct(cells[roc_idx])
 
         yahoo_match = ""
-        if payable:
-            start = payable - timedelta(days=YAHOO_DATE_TOLERANCE)
-            end = payable + timedelta(days=YAHOO_DATE_TOLERANCE)
+        if meta["payment_date"]:
+            start = meta["payment_date"] - timedelta(days=YAHOO_DATE_TOLERANCE)
+            end = meta["payment_date"] + timedelta(days=YAHOO_DATE_TOLERANCE)
             yahoo_match = "Yes" if yahoo_dividends(ticker, start, end) else "No"
 
         rows.append([
             ticker,
-            payable.isoformat() if payable else "",
-            ex_date.isoformat() if ex_date else "",
+            meta["payment_date"].isoformat() if meta["payment_date"] else "",
+            meta["ex_date"].isoformat() if meta["ex_date"] else "",
+            meta["record_date"].isoformat() if meta["record_date"] else "",
             dividend,
             roc,
+            meta["distribution_rate"],
+            meta["sec_30_day_yield"],
             yahoo_match,
             url,
             group
         ])
 
 # ====================================================
-# WRITE CSV (ALWAYS)
+# WRITE CSV
 # ====================================================
 with open(OUTPUT_FILE, "w", newline="", encoding="utf-8") as f:
     writer = csv.writer(f)
     writer.writerow([
         "Ticker",
-        "Distribution Date",
+        "Payment Date",
         "Ex-Dividend Date",
+        "Record Date",
         "Dividend Per Share",
         "ROC %",
+        "Distribution Rate",
+        "30-Day SEC Yield",
         "Yahoo Dividend Match",
         "Source URL",
         "Group"

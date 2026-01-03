@@ -11,18 +11,24 @@ from datetime import datetime
 # ====================================================
 OUTPUT_FILE = "form19a_enriched.csv"
 
-PDF_URL = (
-    "https://yieldmaxetfs.com/wp-content/uploads/"
-    "TaxDocuments/Group_1_Supplemental%20and%20Tax%20IRS%20Form%208937/"
-    "YieldMax%2019a-1%20Notice%2011.13.25%20Payable%20-%20Group%201.pdf"
-)
-
 HEADERS = {
     "User-Agent": "ETF Dividend Research Tool (manual ingestion)",
     "Accept-Encoding": "identity"
 }
 
-TARGET_TICKERS = ["MSTY", "ULTY"]
+# YieldMax groups (THIS IS THE KEY FIX)
+FORM_19A_GROUPS = [
+    {
+        "group": "Group 1",
+        "pdf_url": "https://yieldmaxetfs.com/wp-content/uploads/TaxDocuments/Group_1_Supplemental%20and%20Tax%20IRS%20Form%208937/YieldMax%2019a-1%20Notice%2011.13.25%20Payable%20-%20Group%201.pdf",
+        "tickers": ["ULTY"]
+    },
+    {
+        "group": "Group 2",
+        "pdf_url": "https://yieldmaxetfs.com/wp-content/uploads/TaxDocuments/Group_2_Supplemental%20and%20Tax%20IRS%20Form%208937/YieldMax%2019a-1%20Notice%2011.13.25%20Payable%20-%20Group%202.pdf",
+        "tickers": ["MSTY"]
+    }
+]
 
 # ====================================================
 # HELPERS
@@ -51,54 +57,39 @@ def parse_date(text):
 # ====================================================
 # MAIN
 # ====================================================
-print(f"Downloading PDF:\n{PDF_URL}")
-pdf_bytes = fetch_pdf(PDF_URL)
-full_text = extract_text(pdf_bytes)
-
-print(f"Extracted {len(full_text)} characters")
-
-# ----------------------------
-# 1️⃣ Extract payable date (global)
-# ----------------------------
-payable_match = re.search(
-    r"Payable Date[:\s]*([A-Za-z]+\s+\d{1,2},\s+\d{4})",
-    full_text,
-    re.IGNORECASE
-)
-
-distribution_date = parse_date(payable_match.group(1)) if payable_match else ""
-print(f"Distribution (Payable) Date: {distribution_date}")
-
 rows = []
 
-# ----------------------------
-# 2️⃣ Extract table rows by ticker
-# ----------------------------
-lines = full_text.splitlines()
+for group in FORM_19A_GROUPS:
+    print(f"Processing {group['group']} PDF")
+    pdf_bytes = fetch_pdf(group["pdf_url"])
+    text = extract_text(pdf_bytes)
 
-for line in lines:
-    for ticker in TARGET_TICKERS:
-        if ticker not in line:
-            continue
+    # Extract payable date ONCE per PDF
+    payable_match = re.search(
+        r"Payable Date[:\s]*([A-Za-z]+\s+\d{1,2},\s+\d{4})",
+        text,
+        re.IGNORECASE
+    )
+    distribution_date = parse_date(payable_match.group(1)) if payable_match else ""
 
-        # Extract all percentages from the line
-        pcts = re.findall(r"([0-9]{1,3}\.\d+)%", line)
+    for line in text.splitlines():
+        for ticker in group["tickers"]:
+            if ticker not in line:
+                continue
 
-        # YieldMax tables put ROC % as the LAST percentage
-        roc = float(pcts[-1]) / 100 if pcts else ""
+            pcts = re.findall(r"([0-9]{1,3}\.\d+)%", line)
+            roc = float(pcts[-1]) / 100 if pcts else ""
 
-        print(f"Parsed {ticker}: ROC={roc}")
-
-        rows.append([
-            ticker,
-            distribution_date,
-            "",                 # Ex-dividend date (not disclosed)
-            roc,
-            PDF_URL
-        ])
+            rows.append([
+                ticker,
+                distribution_date,
+                "",              # Ex-dividend date not disclosed
+                roc,
+                group["pdf_url"]
+            ])
 
 # ====================================================
-# WRITE CSV
+# WRITE CSV (ALWAYS FRESH)
 # ====================================================
 with open(OUTPUT_FILE, "w", newline="", encoding="utf-8") as f:
     writer = csv.writer(f)

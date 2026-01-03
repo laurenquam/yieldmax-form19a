@@ -16,7 +16,6 @@ HEADERS = {
     "Accept-Encoding": "identity"
 }
 
-# YieldMax groups (THIS IS THE KEY FIX)
 FORM_19A_GROUPS = [
     {
         "group": "Group 1",
@@ -25,6 +24,7 @@ FORM_19A_GROUPS = [
     },
     {
         "group": "Group 2",
+        # ⚠️ URL MAY NOT EXIST YET — EXPECTED
         "pdf_url": "https://yieldmaxetfs.com/wp-content/uploads/TaxDocuments/Group_2_Supplemental%20and%20Tax%20IRS%20Form%208937/YieldMax%2019a-1%20Notice%2011.13.25%20Payable%20-%20Group%202.pdf",
         "tickers": ["MSTY"]
     }
@@ -33,11 +33,18 @@ FORM_19A_GROUPS = [
 # ====================================================
 # HELPERS
 # ====================================================
-def fetch_pdf(url):
-    r = requests.get(url, headers=HEADERS, timeout=30)
-    r.raise_for_status()
-    time.sleep(0.5)
-    return r.content
+def try_fetch_pdf(url):
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=30)
+        if r.status_code == 404:
+            print(f"⚠️ PDF not found (404): {url}")
+            return None
+        r.raise_for_status()
+        time.sleep(0.5)
+        return r.content
+    except Exception as e:
+        print(f"⚠️ Failed to fetch PDF: {e}")
+        return None
 
 def extract_text(pdf_bytes):
     text = ""
@@ -60,11 +67,15 @@ def parse_date(text):
 rows = []
 
 for group in FORM_19A_GROUPS:
-    print(f"Processing {group['group']} PDF")
-    pdf_bytes = fetch_pdf(group["pdf_url"])
+    print(f"\nProcessing {group['group']}")
+
+    pdf_bytes = try_fetch_pdf(group["pdf_url"])
+    if not pdf_bytes:
+        print(f"Skipping {group['group']} — PDF unavailable")
+        continue
+
     text = extract_text(pdf_bytes)
 
-    # Extract payable date ONCE per PDF
     payable_match = re.search(
         r"Payable Date[:\s]*([A-Za-z]+\s+\d{1,2},\s+\d{4})",
         text,
@@ -83,13 +94,13 @@ for group in FORM_19A_GROUPS:
             rows.append([
                 ticker,
                 distribution_date,
-                "",              # Ex-dividend date not disclosed
+                "",
                 roc,
                 group["pdf_url"]
             ])
 
 # ====================================================
-# WRITE CSV (ALWAYS FRESH)
+# WRITE CSV (ALWAYS)
 # ====================================================
 with open(OUTPUT_FILE, "w", newline="", encoding="utf-8") as f:
     writer = csv.writer(f)
@@ -102,4 +113,4 @@ with open(OUTPUT_FILE, "w", newline="", encoding="utf-8") as f:
     ])
     writer.writerows(rows)
 
-print(f"SUCCESS — wrote {len(rows)} rows to {OUTPUT_FILE}")
+print(f"\nSUCCESS — wrote {len(rows)} rows to {OUTPUT_FILE}")

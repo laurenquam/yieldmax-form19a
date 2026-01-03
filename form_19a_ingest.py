@@ -1,6 +1,7 @@
 import requests
 import csv
 import time
+import re
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 from urllib.parse import urljoin
@@ -17,8 +18,7 @@ HEADERS = {
 
 TARGET_TICKERS = {"ULTY", "MSTY"}
 YIELDMAX_NEWS_INDEX = "https://yieldmaxetfs.com/news/"
-
-YAHOO_DATE_TOLERANCE = 3  # days
+YAHOO_DATE_TOLERANCE = 3
 
 # ====================================================
 # HELPERS
@@ -26,7 +26,7 @@ YAHOO_DATE_TOLERANCE = 3  # days
 def fetch_html(url):
     r = requests.get(url, headers=HEADERS, timeout=30)
     r.raise_for_status()
-    time.sleep(0.25)
+    time.sleep(0.2)
     return r.text
 
 def parse_date(text):
@@ -59,6 +59,15 @@ def yahoo_dividends(ticker, start, end):
     events = data[0].get("events", {}).get("dividends", {})
     return [datetime.fromtimestamp(v["date"]).date() for v in events.values()]
 
+def extract_ticker_from_cells(cells):
+    """
+    Safely find ticker symbol in a row
+    """
+    for cell in cells:
+        if cell in TARGET_TICKERS:
+            return cell
+    return None
+
 # ====================================================
 # STEP 1 — DISCOVER YIELDMAX NEWS POSTS
 # ====================================================
@@ -71,14 +80,8 @@ yieldmax_posts = []
 
 for a in index_soup.find_all("a", href=True):
     title = a.get_text(strip=True)
-    href = a["href"]
-
-    if (
-        "Weekly Distributions" in title
-        and "Group" in title
-    ):
-        full_url = urljoin(YIELDMAX_NEWS_INDEX, href)
-        yieldmax_posts.append(full_url)
+    if "Weekly Distributions" in title and "Group" in title:
+        yieldmax_posts.append(urljoin(YIELDMAX_NEWS_INDEX, a["href"]))
 
 yieldmax_posts = list(dict.fromkeys(yieldmax_posts))
 print(f"Found {len(yieldmax_posts)} YieldMax news posts")
@@ -113,6 +116,10 @@ for url in globe_urls:
     title = soup.find("h1").get_text(strip=True)
     group = "Group 1" if "Group 1" in title else "Group 2" if "Group 2" in title else ""
 
+    # Only care about Group 1 / Group 2 releases
+    if not group:
+        continue
+
     table = soup.find("table")
     if not table:
         continue
@@ -122,18 +129,18 @@ for url in globe_urls:
 
     for tr in table.find_all("tr"):
         cells = [td.get_text(strip=True) for td in tr.find_all("td")]
-        if len(cells) <= roc_idx:
+
+        # 🔒 DEFENSIVE GUARD
+        if len(cells) < 4:
             continue
 
-        row = dict(zip(headers, cells))
-        ticker = row.get("Ticker") or row.get("Symbol") or cells[1]
-
-        if ticker not in TARGET_TICKERS:
+        ticker = extract_ticker_from_cells(cells)
+        if not ticker:
             continue
 
-        payable = parse_date(row.get("Payable Date", ""))
-        ex_date = parse_date(row.get("Ex-Date", ""))
-        dividend = row.get("Distribution Amount", "")
+        payable = parse_date(cells[-3])
+        ex_date = parse_date(cells[-4])
+        dividend = cells[-5] if len(cells) >= 5 else ""
         roc = parse_pct(cells[roc_idx])
 
         yahoo_match = ""
@@ -154,7 +161,7 @@ for url in globe_urls:
         ])
 
 # ====================================================
-# WRITE CSV
+# WRITE CSV (ALWAYS)
 # ====================================================
 with open(OUTPUT_FILE, "w", newline="", encoding="utf-8") as f:
     writer = csv.writer(f)

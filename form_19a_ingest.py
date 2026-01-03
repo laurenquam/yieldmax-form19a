@@ -1,12 +1,12 @@
 import requests
-import time
 import csv
-import re
+import time
+from bs4 import BeautifulSoup
+from datetime import datetime
 
 # ====================================================
 # CONFIG
 # ====================================================
-CIK = "0001980842"   # YieldMax Option Income ETF Trust
 OUTPUT_FILE = "form19a_enriched.csv"
 
 HEADERS = {
@@ -14,104 +14,97 @@ HEADERS = {
     "Accept-Encoding": "identity"
 }
 
-# Only filing types that can contain narrative disclosures
-ALLOWED_FORMS = {
-    "497",
-    "497K",
-    "N-1A",
-    "N-1A/A",
-    "SUPPL",
-    "N-CSR"
-}
+TARGET_TICKERS = {"ULTY", "MSTY"}
 
-# Fund name → ticker mapping
-FUND_NAME_MAP = {
-    "YieldMax MSTR Option Income ETF": "MSTY",
-    "YieldMax Ultra Option Income ETF": "ULTY",
-}
+# Seed list – expand over time or automate discovery later
+NEWS_RELEASE_URLS = [
+    # Group 1 example (ULTY)
+    "https://www.globenewswire.com/news-release/2025/12/30/3211304/0/en/YieldMax-ETFs-Announces-Weekly-Distributions-for-Group-1-ETFs.html",
 
-# Keywords that identify a Rule 19a-1 disclosure
-FORM_19A_KEYWORDS = [
-    "rule 19a-1",
-    "19a-1",
-    "section 19(a)"
+    # Group 2 example (add as needed)
+    # "https://www.globenewswire.com/news-release/YYYY/MM/DD/...Group-2-ETFs.html",
 ]
 
 # ====================================================
 # HELPERS
 # ====================================================
-def fetch_json(url):
+def fetch_html(url):
     r = requests.get(url, headers=HEADERS, timeout=30)
     r.raise_for_status()
     time.sleep(0.25)
-    return r.json()
+    return r.text
 
-def fetch_text(url):
-    r = requests.get(url, headers=HEADERS, timeout=30)
-    r.raise_for_status()
-    time.sleep(0.25)
-    return r.text.lower()
+def parse_date(text):
+    try:
+        return datetime.strptime(text.strip(), "%B %d, %Y").date().isoformat()
+    except:
+        return ""
 
-def is_narrative_document(filename):
-    return filename.lower().endswith((".htm", ".html", ".txt"))
+def parse_pct(text):
+    try:
+        return float(text.replace("%", "").strip()) / 100
+    except:
+        return ""
 
 # ====================================================
 # MAIN
 # ====================================================
 rows = []
 
-print("Fetching EDGAR submissions index…")
-submissions = fetch_json(
-    f"https://data.sec.gov/submissions/CIK{CIK}.json"
-)
+for url in NEWS_RELEASE_URLS:
+    print(f"Processing release: {url}")
 
-recent = submissions["filings"]["recent"]
+    html = fetch_html(url)
+    soup = BeautifulSoup(html, "html.parser")
 
-for i, form in enumerate(recent["form"]):
-    # ------------------------------------------------
-    # 1️⃣ Filter by plausible form types
-    # ------------------------------------------------
-    if form not in ALLOWED_FORMS:
-        continue
-
-    primary_doc = recent["primaryDocument"][i]
-    if not is_narrative_document(primary_doc):
-        continue
-
-    accession = recent["accessionNumber"][i].replace("-", "")
-    filing_date = recent["filingDate"][i]
-
-    filing_url = (
-        f"https://www.sec.gov/Archives/edgar/data/"
-        f"{int(CIK)}/{accession}/{primary_doc}"
+    # Infer group from headline
+    title = soup.find("h1").get_text(strip=True)
+    group = (
+        "Group 1" if "Group 1" in title
+        else "Group 2" if "Group 2" in title
+        else ""
     )
 
-    try:
-        text = fetch_text(filing_url)
-    except Exception:
-        print(f"Skipping (fetch failed): {filing_url}")
+    table = soup.find("table")
+    if not table:
+        print("⚠️ No table found, skipping")
         continue
 
-    # ------------------------------------------------
-    # 2️⃣ Content-based detection of Rule 19a-1
-    # ------------------------------------------------
-    if not any(k in text for k in FORM_19A_KEYWORDS):
-        continue
+    # Extract headers
+    headers = [th.get_text(strip=True) for th in table.find_all("th")]
+    last_col_idx = len(headers) - 1  # ROC column
 
-    print(f"Detected 19a-1 disclosure: {filing_url}")
+    for tr in table.find_all("tr"):
+        cells = [td.get_text(strip=True) for td in tr.find_all("td")]
+        if not cells or len(cells) <= last_col_idx:
+            continue
 
-    # ------------------------------------------------
-    # 3️⃣ Identify which ETF(s) are referenced
-    # ------------------------------------------------
-    for fund_name, ticker in FUND_NAME_MAP.items():
-        if fund_name.lower() in text:
-            rows.append([
-                ticker,
-                filing_date,
-                "",          # ex-div (joined later)
-                "",          # ROC (added later)
-                filing_url
-            ])
+        # Normalize row into dict
+        row = dict(zip(headers, cells))
+        ticker = (
+            row.get("Ticker")
+            or row.get("Symbol")
+            or cells[1]   # defensive fallback
+        )
+
+        if ticker not in TARGET_TICKERS:
+            continue
+
+        distribution = row.get("Distribution Amount", "")
+        ex_date = parse_date(row.get("Ex-Date", ""))
+        payable_date = parse_date(row.get("Payable Date", ""))
+
+        roc_pct = parse_pct(cells[last_col_idx])
+
+        rows.append([
+            ticker,
+            payable_date,
+            ex_date,
+            distribution,
+            roc_pct,
+            url,
+            group
+        ])
 
 # ====================================================
 # WRITE CSV (ALWAYS)
@@ -122,10 +115,11 @@ with open(OUTPUT_FILE, "w", newline="", encoding="utf-8") as f:
         "Ticker",
         "Distribution Date",
         "Ex-Dividend Date",
+        "Dividend Per Share",
         "ROC %",
-        "SEC Filing URL"
+        "Source URL",
+        "Group"
     ])
     writer.writerows(rows)
 
 print(f"SUCCESS — wrote {len(rows)} rows to {OUTPUT_FILE}")
-

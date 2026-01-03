@@ -13,6 +13,7 @@ OUTPUT_FILE = "form19a_enriched.csv"
 
 HEADERS = {
     "User-Agent": "ETF Dividend Research Tool (manual ingestion)",
+    "Accept": "text/html",
     "Accept-Encoding": "identity"
 }
 
@@ -26,19 +27,19 @@ YAHOO_DATE_TOLERANCE = 3  # days
 def fetch_html(url):
     r = requests.get(url, headers=HEADERS, timeout=30)
     r.raise_for_status()
-    time.sleep(0.2)
+    time.sleep(0.25)
     return r.text
 
 def parse_date(text):
     try:
         return datetime.strptime(text.strip(), "%B %d, %Y").date()
-    except:
+    except Exception:
         return None
 
 def parse_pct(text):
     try:
         return float(text.replace("%", "").strip()) / 100
-    except:
+    except Exception:
         return ""
 
 def extract_ticker_from_cells(cells):
@@ -48,9 +49,6 @@ def extract_ticker_from_cells(cells):
     return None
 
 def yahoo_dividends(ticker, start_date, end_date):
-    """
-    start_date and end_date are datetime.date objects
-    """
     start_dt = datetime.combine(start_date, datetime.min.time())
     end_dt = datetime.combine(end_date, datetime.min.time())
 
@@ -73,10 +71,7 @@ def yahoo_dividends(ticker, start_date, end_date):
     return [datetime.fromtimestamp(v["date"]).date() for v in events.values()]
 
 def extract_header_fields(text):
-    """
-    Extract metadata fields that appear above the table
-    """
-    def grab(label):
+    def grab_date(label):
         m = re.search(label + r"\s*:\s*([A-Za-z]+\s+\d{1,2},\s+\d{4})", text)
         return parse_date(m.group(1)) if m else None
 
@@ -85,9 +80,9 @@ def extract_header_fields(text):
         return parse_pct(m.group(1)) if m else ""
 
     return {
-        "payment_date": grab("Payment Date"),
-        "ex_date": grab("Ex-Date"),
-        "record_date": grab("Record Date"),
+        "payment_date": grab_date("Payment Date"),
+        "ex_date": grab_date("Ex-Date"),
+        "record_date": grab_date("Record Date"),
         "distribution_rate": grab_pct("Distribution Rate"),
         "sec_30_day_yield": grab_pct("30-Day SEC Yield"),
     }
@@ -128,7 +123,7 @@ globe_urls = list(dict.fromkeys(globe_urls))
 print(f"Discovered {len(globe_urls)} GlobeNewswire releases")
 
 # ====================================================
-# STEP 3 — PARSE GLOBENEWSWIRE TABLES
+# STEP 3 — PARSE GLOBENEWSWIRE RELEASES
 # ====================================================
 rows = []
 
@@ -137,7 +132,11 @@ for url in globe_urls:
     html = fetch_html(url)
     soup = BeautifulSoup(html, "html.parser")
 
-    title = soup.find("h1").get_text(strip=True)
+    h1 = soup.find("h1")
+    if not h1:
+        continue
+
+    title = h1.get_text(strip=True)
     group = "Group 1" if "Group 1" in title else "Group 2" if "Group 2" in title else ""
     if not group:
         continue
@@ -154,6 +153,7 @@ for url in globe_urls:
 
     for tr in table.find_all("tr"):
         cells = [td.get_text(strip=True) for td in tr.find_all("td")]
+
         if len(cells) < 4:
             continue
 

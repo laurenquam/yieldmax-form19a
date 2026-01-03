@@ -4,26 +4,20 @@ import csv
 from bs4 import BeautifulSoup
 from datetime import datetime
 
-# ====================================================
-# CONFIG
-# ====================================================
-CIK = "0001980842"   # YieldMax Trust
+CIK = "0001980842"
 OUTPUT_FILE = "form19a_enriched.csv"
 
-USER_AGENT = "ETF Dividend Research Tool (manual ingestion)"
 HEADERS = {
-    "User-Agent": USER_AGENT,
+    "User-Agent": "ETF Dividend Research Tool (manual ingestion)",
     "Accept-Encoding": "identity"
 }
 
+# Normalize fund names (no special characters)
 ETF_MAP = {
-    "YieldMax™ MSTR Option Income ETF": "MSTY",
-    "YieldMax™ Ultra Option Income ETF": "ULTY"
+    "YieldMax MSTR Option Income ETF": "MSTY",
+    "YieldMax Ultra Option Income ETF": "ULTY"
 }
 
-# ====================================================
-# HELPERS
-# ====================================================
 def fetch_json(url):
     r = requests.get(url, headers=HEADERS, timeout=30)
     r.raise_for_status()
@@ -36,77 +30,73 @@ def fetch_html(url):
     time.sleep(0.5)
     return r.text
 
-def parse_date_safe(text):
+def safe_date(d):
     try:
-        return datetime.strptime(text.strip(), "%B %d, %Y").date().isoformat()
-    except Exception:
+        return datetime.strptime(d, "%Y-%m-%d").date().isoformat()
+    except:
         return ""
 
-# ====================================================
-# LOAD TRUST SUBMISSIONS
-# ====================================================
-submissions = fetch_json(
-    f"https://data.sec.gov/submissions/CIK{CIK}.json"
-)
-
-recent = submissions["filings"]["recent"]
 rows = []
 
-# ====================================================
-# LOOP FORM 19A FILINGS
-# ====================================================
+print("Fetching SEC submissions index...")
+submissions = fetch_json(f"https://data.sec.gov/submissions/CIK{CIK}.json")
+recent = submissions["filings"]["recent"]
+
 for i, form in enumerate(recent["form"]):
     if "19A" not in form.upper():
         continue
 
     accession = recent["accessionNumber"][i].replace("-", "")
-    primary_doc = recent["primaryDocument"][i]
+    primary = recent["primaryDocument"][i]
     filing_date = recent["filingDate"][i]
 
     filing_url = (
         f"https://www.sec.gov/Archives/edgar/data/"
-        f"{int(CIK)}/{accession}/{primary_doc}"
+        f"{int(CIK)}/{accession}/{primary}"
     )
 
     print(f"Processing: {filing_url}")
 
-    html = fetch_html(filing_url)
-    soup = BeautifulSoup(html, "html.parser")
-
-    tables = soup.find_all("table")
-    if not tables:
+    try:
+        html = fetch_html(filing_url)
+    except Exception as e:
+        print("Failed to fetch filing:", e)
         continue
 
+    soup = BeautifulSoup(html, "html.parser")
+    tables = soup.find_all("table")
+
+    print(f"Found {len(tables)} tables")
+
     for table in tables:
-        rows_html = table.find_all("tr")
-        for tr in rows_html:
+        for tr in table.find_all("tr"):
             cells = [c.get_text(strip=True) for c in tr.find_all(["td", "th"])]
-            if len(cells) < 3:
+            if len(cells) < 2:
                 continue
 
+            row_text = " ".join(cells)
+
             for fund_name, ticker in ETF_MAP.items():
-                if fund_name not in cells[0]:
+                if fund_name.lower() not in row_text.lower():
                     continue
 
-                roc_value = ""
+                roc = ""
                 for c in cells:
                     if "%" in c:
                         try:
-                            roc_value = float(c.replace("%", "")) / 100
+                            roc = float(c.replace("%", "").strip()) / 100
                         except:
                             pass
 
                 rows.append([
                     ticker,
-                    filing_date,   # Distribution date proxy
-                    "",             # Ex-div (still blank)
-                    roc_value,
+                    filing_date,
+                    "",
+                    roc,
                     filing_url
                 ])
 
-# ====================================================
-# WRITE CSV (ALWAYS)
-# ====================================================
+# Always write CSV so GitHub commit step succeeds
 with open(OUTPUT_FILE, "w", newline="", encoding="utf-8") as f:
     writer = csv.writer(f)
     writer.writerow([
@@ -118,4 +108,4 @@ with open(OUTPUT_FILE, "w", newline="", encoding="utf-8") as f:
     ])
     writer.writerows(rows)
 
-print(f"Wrote {len(rows)} rows to {OUTPUT_FILE}")
+print(f"SUCCESS: wrote {len(rows)} rows to {OUTPUT_FILE}")

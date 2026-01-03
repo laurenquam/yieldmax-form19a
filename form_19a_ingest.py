@@ -1,8 +1,8 @@
 import requests
 import time
 import csv
+import io
 import re
-import io                      # ← FIX
 import pdfplumber
 from datetime import datetime
 
@@ -11,30 +11,29 @@ from datetime import datetime
 # ====================================================
 OUTPUT_FILE = "form19a_enriched.csv"
 
-USER_AGENT = "ETF Dividend Research Tool (manual ingestion)"
-HEADERS = {
-    "User-Agent": USER_AGENT,
-    "Accept-Encoding": "identity"
-}
-
-ETF_TICKERS = ["MSTY", "ULTY"]
-
 PDF_URL = (
     "https://yieldmaxetfs.com/wp-content/uploads/"
     "TaxDocuments/Group_1_Supplemental%20and%20Tax%20IRS%20Form%208937/"
     "YieldMax%2019a-1%20Notice%2011.13.25%20Payable%20-%20Group%201.pdf"
 )
 
+HEADERS = {
+    "User-Agent": "ETF Dividend Research Tool (manual ingestion)",
+    "Accept-Encoding": "identity"
+}
+
+TARGET_TICKERS = ["MSTY", "ULTY"]
+
 # ====================================================
 # HELPERS
 # ====================================================
-def fetch_binary(url):
+def fetch_pdf(url):
     r = requests.get(url, headers=HEADERS, timeout=30)
     r.raise_for_status()
     time.sleep(0.5)
     return r.content
 
-def extract_pdf_text(pdf_bytes):
+def extract_text(pdf_bytes):
     text = ""
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         for page in pdf.pages:
@@ -46,60 +45,57 @@ def extract_pdf_text(pdf_bytes):
 def parse_date(text):
     try:
         return datetime.strptime(text.strip(), "%B %d, %Y").date().isoformat()
-    except Exception:
+    except:
         return ""
 
 # ====================================================
 # MAIN
 # ====================================================
+print(f"Downloading PDF:\n{PDF_URL}")
+pdf_bytes = fetch_pdf(PDF_URL)
+full_text = extract_text(pdf_bytes)
+
+print(f"Extracted {len(full_text)} characters")
+
+# ----------------------------
+# 1️⃣ Extract payable date (global)
+# ----------------------------
+payable_match = re.search(
+    r"Payable Date[:\s]*([A-Za-z]+\s+\d{1,2},\s+\d{4})",
+    full_text,
+    re.IGNORECASE
+)
+
+distribution_date = parse_date(payable_match.group(1)) if payable_match else ""
+print(f"Distribution (Payable) Date: {distribution_date}")
+
 rows = []
 
-print(f"Fetching and parsing PDF:\n{PDF_URL}")
-pdf_bytes = fetch_binary(PDF_URL)
-pdf_text = extract_pdf_text(pdf_bytes)
+# ----------------------------
+# 2️⃣ Extract table rows by ticker
+# ----------------------------
+lines = full_text.splitlines()
 
-print(f"Extracted {len(pdf_text)} characters from PDF")
+for line in lines:
+    for ticker in TARGET_TICKERS:
+        if ticker not in line:
+            continue
 
-for ticker in ETF_TICKERS:
-    if ticker not in pdf_text:
-        print(f"{ticker} not found in PDF")
-        continue
+        # Extract all percentages from the line
+        pcts = re.findall(r"([0-9]{1,3}\.\d+)%", line)
 
-    # Narrow to local context around ticker
-    idx = pdf_text.find(ticker)
-    snippet = pdf_text[max(0, idx - 500): idx + 500]
+        # YieldMax tables put ROC % as the LAST percentage
+        roc = float(pcts[-1]) / 100 if pcts else ""
 
-    dist_match = re.search(
-        r"Distribution Date[:\s]*([A-Za-z]+\s+\d{1,2},\s+\d{4})",
-        snippet,
-        re.IGNORECASE
-    )
+        print(f"Parsed {ticker}: ROC={roc}")
 
-    ex_match = re.search(
-        r"Ex[- ]Dividend Date[:\s]*([A-Za-z]+\s+\d{1,2},\s+\d{4})",
-        snippet,
-        re.IGNORECASE
-    )
-
-    roc_match = re.search(
-        r"Return of Capital[^0-9]*([0-9]{1,3}\.?[0-9]*)\s*%",
-        snippet,
-        re.IGNORECASE
-    )
-
-    dist_date = parse_date(dist_match.group(1)) if dist_match else ""
-    ex_date = parse_date(ex_match.group(1)) if ex_match else ""
-    roc = float(roc_match.group(1)) / 100 if roc_match else ""
-
-    print(f"{ticker}: dist={dist_date}, ex={ex_date}, roc={roc}")
-
-    rows.append([
-        ticker,
-        dist_date,
-        ex_date,
-        roc,
-        PDF_URL
-    ])
+        rows.append([
+            ticker,
+            distribution_date,
+            "",                 # Ex-dividend date (not disclosed)
+            roc,
+            PDF_URL
+        ])
 
 # ====================================================
 # WRITE CSV
@@ -116,4 +112,3 @@ with open(OUTPUT_FILE, "w", newline="", encoding="utf-8") as f:
     writer.writerows(rows)
 
 print(f"SUCCESS — wrote {len(rows)} rows to {OUTPUT_FILE}")
-

@@ -88,7 +88,7 @@ def extract_header_fields(text):
     }
 
 # ====================================================
-# STEP 1 — DISCOVER YIELDMAX NEWS POSTS
+# STEP 1 — DISCOVER YIELDMAX NEWS POSTS (INCLUSIVE OR)
 # ====================================================
 print("Discovering YieldMax news posts…")
 
@@ -98,12 +98,19 @@ index_soup = BeautifulSoup(index_html, "html.parser")
 yieldmax_posts = []
 
 for a in index_soup.find_all("a", href=True):
-    title = a.get_text(strip=True)
-    if "Weekly Distributions" in title and "Group" in title:
+    title = a.get_text(strip=True).upper()
+
+    if (
+        "GROUP 1" in title
+        or "GROUP 2" in title
+        or "ULTY" in title
+        or "MSTY" in title
+        or "DISTRIBU" in title
+    ):
         yieldmax_posts.append(urljoin(YIELDMAX_NEWS_INDEX, a["href"]))
 
 yieldmax_posts = list(dict.fromkeys(yieldmax_posts))
-print(f"Found {len(yieldmax_posts)} YieldMax news posts")
+print(f"Found {len(yieldmax_posts)} YieldMax candidate posts")
 
 # ====================================================
 # STEP 2 — EXTRACT GLOBENEWSWIRE LINKS
@@ -114,6 +121,10 @@ for post_url in yieldmax_posts:
     print(f"Scanning YieldMax post: {post_url}")
     post_html = fetch_html(post_url)
     post_soup = BeautifulSoup(post_html, "html.parser")
+    post_text = post_soup.get_text(" ", strip=True).upper()
+
+    if not ("ULTY" in post_text or "MSTY" in post_text):
+        continue
 
     for a in post_soup.find_all("a", href=True):
         if "globenewswire.com" in a["href"]:
@@ -132,17 +143,15 @@ for url in globe_urls:
     html = fetch_html(url)
     soup = BeautifulSoup(html, "html.parser")
 
+    body_text = soup.get_text(" ", strip=True).upper()
+    if not ("ULTY" in body_text or "MSTY" in body_text):
+        continue
+
     h1 = soup.find("h1")
-    if not h1:
-        continue
+    title = h1.get_text(strip=True).upper() if h1 else ""
+    group = "Group 1" if "GROUP 1" in title else "Group 2" if "GROUP 2" in title else ""
 
-    title = h1.get_text(strip=True)
-    group = "Group 1" if "Group 1" in title else "Group 2" if "Group 2" in title else ""
-    if not group:
-        continue
-
-    full_text = soup.get_text(" ", strip=True)
-    meta = extract_header_fields(full_text)
+    meta = extract_header_fields(soup.get_text(" ", strip=True))
 
     table = soup.find("table")
     if not table:
@@ -153,7 +162,6 @@ for url in globe_urls:
 
     for tr in table.find_all("tr"):
         cells = [td.get_text(strip=True) for td in tr.find_all("td")]
-
         if len(cells) < 4:
             continue
 

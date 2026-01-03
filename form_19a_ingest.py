@@ -12,15 +12,16 @@ from urllib.parse import urljoin
 OUTPUT_FILE = "form19a_enriched.csv"
 
 HEADERS = {
-    "User-Agent": "ETF Dividend Research Tool (manual ingestion)",
+    "User-Agent": "ETF Dividend Research Tool",
     "Accept": "text/html",
     "Accept-Encoding": "identity"
 }
 
 TARGET_TICKERS = {"ULTY", "MSTY"}
 YIELDMAX_NEWS_INDEX = "https://yieldmaxetfs.com/news/"
+
 YAHOO_TOLERANCE_DAYS = 3
-AMOUNT_TOLERANCE = 0.01  # $0.01 tolerance for Yahoo vs issuer
+AMOUNT_TOLERANCE = 0.01
 
 # ====================================================
 # BASIC HELPERS
@@ -28,7 +29,7 @@ AMOUNT_TOLERANCE = 0.01  # $0.01 tolerance for Yahoo vs issuer
 def fetch_html(url):
     r = requests.get(url, headers=HEADERS, timeout=30)
     r.raise_for_status()
-    time.sleep(0.25)
+    time.sleep(0.2)
     return r.text
 
 def parse_date(text):
@@ -50,7 +51,7 @@ def parse_float(text):
         return None
 
 # ====================================================
-# YAHOO VALIDATION (QA ONLY)
+# YAHOO DIVIDENDS (VALIDATION ONLY)
 # ====================================================
 def yahoo_dividends(ticker, start_date, end_date):
     start_dt = datetime.combine(start_date, datetime.min.time())
@@ -72,19 +73,19 @@ def yahoo_dividends(ticker, start_date, end_date):
         return []
 
     events = data[0].get("events", {}).get("dividends", {})
-    results = []
+    out = []
     for v in events.values():
-        results.append({
+        out.append({
             "date": datetime.fromtimestamp(v["date"]).date(),
             "amount": float(v["amount"])
         })
-    return results
+    return out
 
 # ====================================================
-# HEADER (PER-RELEASE) EXTRACTION
+# RELEASE-LEVEL METADATA
 # ====================================================
 def extract_release_metadata(text):
-    def grab_date(patterns):
+    def grab(patterns):
         for p in patterns:
             m = re.search(p, text, re.IGNORECASE)
             if m:
@@ -92,20 +93,20 @@ def extract_release_metadata(text):
         return None
 
     return {
-        "payment_date": grab_date([
+        "payment_date": grab([
             r"Payment Date\s*:\s*([A-Za-z]+\s+\d{1,2},\s+\d{4})"
         ]),
-        "ex_date": grab_date([
+        "ex_date": grab([
             r"Ex[-\s]?Date\s*:\s*([A-Za-z]+\s+\d{1,2},\s+\d{4})",
             r"Ex[-\s]?Dividend Date\s*:\s*([A-Za-z]+\s+\d{1,2},\s+\d{4})"
         ]),
-        "record_date": grab_date([
+        "record_date": grab([
             r"Record Date\s*:\s*([A-Za-z]+\s+\d{1,2},\s+\d{4})"
         ])
     }
 
 # ====================================================
-# STEP 1 — DISCOVER YIELDMAX NEWS POSTS (INCLUSIVE)
+# STEP 1 — DISCOVER YIELDMAX POSTS (BROAD)
 # ====================================================
 print("Discovering YieldMax news posts…")
 
@@ -117,8 +118,7 @@ yieldmax_posts = []
 for a in index_soup.find_all("a", href=True):
     title = a.get_text(strip=True).upper()
     if (
-        "GROUP 1" in title
-        or "GROUP 2" in title
+        "GROUP" in title
         or "ULTY" in title
         or "MSTY" in title
         or "DISTRIBU" in title
@@ -129,19 +129,19 @@ yieldmax_posts = list(dict.fromkeys(yieldmax_posts))
 print(f"Found {len(yieldmax_posts)} YieldMax candidate posts")
 
 # ====================================================
-# STEP 2 — EXTRACT RELEVANT GLOBENEWSWIRE LINKS
+# STEP 2 — EXTRACT GLOBENEWSWIRE LINKS
 # ====================================================
 globe_urls = []
 
 for post_url in yieldmax_posts:
-    post_html = fetch_html(post_url)
-    post_soup = BeautifulSoup(post_html, "html.parser")
-    post_text = post_soup.get_text(" ", strip=True).upper()
+    html = fetch_html(post_url)
+    soup = BeautifulSoup(html, "html.parser")
+    text = soup.get_text(" ", strip=True).upper()
 
-    if not ("ULTY" in post_text or "MSTY" in post_text):
+    if not ("ULTY" in text or "MSTY" in text):
         continue
 
-    for a in post_soup.find_all("a", href=True):
+    for a in soup.find_all("a", href=True):
         if "globenewswire.com" in a["href"]:
             globe_urls.append(a["href"])
 
@@ -149,10 +149,10 @@ globe_urls = list(dict.fromkeys(globe_urls))
 print(f"Discovered {len(globe_urls)} GlobeNewswire releases")
 
 # ====================================================
-# STEP 3 — PARSE GLOBENEWSWIRE RELEASES
+# STEP 3 — PARSE GLOBENEWSWIRE TABLES
 # ====================================================
 rows = []
-yieldmax_keys = set()  # (ticker, ex_date) for completeness check
+yieldmax_keys = set()  # (ticker, ex_date)
 
 for url in globe_urls:
     html = fetch_html(url)
@@ -181,24 +181,28 @@ for url in globe_urls:
                 return header_map[n.lower()]
         return None
 
-    idx_ticker = col("ticker", "symbol")
     idx_div = col("distribution amount", "distribution", "dividend")
     idx_rate = col("distribution rate")
-    idx_sec_yield = col("30-day sec yield", "30 day sec yield")
-    roc_idx = len(headers) - 1  # ROC always last
+    idx_sec = col("30-day sec yield", "30 day sec yield")
+    roc_idx = len(headers) - 1
 
     for tr in table.find_all("tr"):
         cells = [td.get_text(strip=True) for td in tr.find_all("td")]
         if len(cells) <= roc_idx:
             continue
 
-        ticker = cells[idx_ticker] if idx_ticker is not None else None
-        if ticker not in TARGET_TICKERS:
+        row_text = " ".join(cells).upper()
+
+        if "ULTY" in row_text:
+            ticker = "ULTY"
+        elif "MSTY" in row_text:
+            ticker = "MSTY"
+        else:
             continue
 
         dividend = parse_float(cells[idx_div]) if idx_div is not None else None
         dist_rate = parse_pct(cells[idx_rate]) if idx_rate is not None else None
-        sec_yield = parse_pct(cells[idx_sec_yield]) if idx_sec_yield is not None else None
+        sec_yield = parse_pct(cells[idx_sec]) if idx_sec is not None else None
         roc = parse_pct(cells[roc_idx])
 
         ex_date = meta["ex_date"]
@@ -207,7 +211,6 @@ for url in globe_urls:
 
         yieldmax_keys.add((ticker, ex_date))
 
-        # Yahoo validation
         yahoo_date = None
         yahoo_amt = None
         yahoo_match = "No"
@@ -243,9 +246,8 @@ for url in globe_urls:
         ])
 
 # ====================================================
-# STEP 4 — COMPLETENESS CHECK (YAHOO-ANCHOR)
+# STEP 4 — COMPLETENESS (YAHOO-ANCHOR)
 # ====================================================
-completeness_rows = []
 for ticker in TARGET_TICKERS:
     all_yahoo = yahoo_dividends(
         ticker,
@@ -253,9 +255,8 @@ for ticker in TARGET_TICKERS:
         datetime.today().date()
     )
     for ev in all_yahoo:
-        key = (ticker, ev["date"])
-        if key not in yieldmax_keys:
-            completeness_rows.append([
+        if (ticker, ev["date"]) not in yieldmax_keys:
+            rows.append([
                 ticker,
                 None,
                 None,
@@ -270,8 +271,6 @@ for ticker in TARGET_TICKERS:
                 "Missing YieldMax",
                 None
             ])
-
-rows.extend(completeness_rows)
 
 # ====================================================
 # WRITE CSV

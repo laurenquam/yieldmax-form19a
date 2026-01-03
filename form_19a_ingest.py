@@ -14,13 +14,23 @@ HEADERS = {
     "Accept-Encoding": "identity"
 }
 
-# Map fund names (as they appear in filings) to tickers
+# Only filing types that can contain narrative disclosures
+ALLOWED_FORMS = {
+    "497",
+    "497K",
+    "N-1A",
+    "N-1A/A",
+    "SUPPL",
+    "N-CSR"
+}
+
+# Fund name → ticker mapping
 FUND_NAME_MAP = {
     "YieldMax MSTR Option Income ETF": "MSTY",
     "YieldMax Ultra Option Income ETF": "ULTY",
 }
 
-# Keywords that positively identify a 19a-1 notice
+# Keywords that identify a Rule 19a-1 disclosure
 FORM_19A_KEYWORDS = [
     "rule 19a-1",
     "19a-1",
@@ -42,12 +52,15 @@ def fetch_text(url):
     time.sleep(0.25)
     return r.text.lower()
 
+def is_narrative_document(filename):
+    return filename.lower().endswith((".htm", ".html", ".txt"))
+
 # ====================================================
 # MAIN
 # ====================================================
 rows = []
 
-print("Fetching EDGAR submissions index...")
+print("Fetching EDGAR submissions index…")
 submissions = fetch_json(
     f"https://data.sec.gov/submissions/CIK{CIK}.json"
 )
@@ -55,8 +68,17 @@ submissions = fetch_json(
 recent = submissions["filings"]["recent"]
 
 for i, form in enumerate(recent["form"]):
-    accession = recent["accessionNumber"][i].replace("-", "")
+    # ------------------------------------------------
+    # 1️⃣ Filter by plausible form types
+    # ------------------------------------------------
+    if form not in ALLOWED_FORMS:
+        continue
+
     primary_doc = recent["primaryDocument"][i]
+    if not is_narrative_document(primary_doc):
+        continue
+
+    accession = recent["accessionNumber"][i].replace("-", "")
     filing_date = recent["filingDate"][i]
 
     filing_url = (
@@ -66,28 +88,28 @@ for i, form in enumerate(recent["form"]):
 
     try:
         text = fetch_text(filing_url)
-    except Exception as e:
+    except Exception:
         print(f"Skipping (fetch failed): {filing_url}")
         continue
 
     # ------------------------------------------------
-    # Content-based detection of Form 19a-1
+    # 2️⃣ Content-based detection of Rule 19a-1
     # ------------------------------------------------
     if not any(k in text for k in FORM_19A_KEYWORDS):
         continue
 
-    print(f"Detected 19a-1 content: {filing_url}")
+    print(f"Detected 19a-1 disclosure: {filing_url}")
 
     # ------------------------------------------------
-    # Identify which ETF(s) are referenced
+    # 3️⃣ Identify which ETF(s) are referenced
     # ------------------------------------------------
     for fund_name, ticker in FUND_NAME_MAP.items():
         if fund_name.lower() in text:
             rows.append([
                 ticker,
-                filing_date,     # authoritative filing date
-                "",              # ex-div (joined later)
-                "",              # ROC (added later if available)
+                filing_date,
+                "",          # ex-div (joined later)
+                "",          # ROC (added later)
                 filing_url
             ])
 

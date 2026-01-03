@@ -47,13 +47,20 @@ def extract_ticker_from_cells(cells):
             return cell
     return None
 
-def yahoo_dividends(ticker, start, end):
+def yahoo_dividends(ticker, start_date, end_date):
+    """
+    start_date and end_date are datetime.date objects
+    """
+    start_dt = datetime.combine(start_date, datetime.min.time())
+    end_dt = datetime.combine(end_date, datetime.min.time())
+
     url = (
         f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}"
-        f"?period1={int(start.timestamp())}"
-        f"&period2={int(end.timestamp())}"
+        f"?period1={int(start_dt.timestamp())}"
+        f"&period2={int(end_dt.timestamp())}"
         f"&interval=1d&events=div"
     )
+
     r = requests.get(url, headers=HEADERS, timeout=30)
     if r.status_code != 200:
         return []

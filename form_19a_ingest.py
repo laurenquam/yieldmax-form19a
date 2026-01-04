@@ -40,6 +40,9 @@ def extract_date_block(text, label):
     )
     return m.group(1) if m else ""
 
+def normalize_space(s):
+    return re.sub(r"\s+", " ", s).strip()
+
 # ====================================================
 # STEP 1 — DISCOVER YIELDMAX NEWS POSTS
 # ====================================================
@@ -52,7 +55,7 @@ yieldmax_posts = []
 
 for a in index_soup.find_all("a", href=True):
     title = a.get_text(strip=True).upper()
-    if any(t in title for t in ["GROUP", "ULTY", "MSTY", "DISTRIBU"]):
+    if any(k in title for k in ["GROUP", "ULTY", "MSTY", "DISTRIBU"]):
         yieldmax_posts.append(urljoin(YIELDMAX_NEWS_INDEX, a["href"]))
 
 yieldmax_posts = list(dict.fromkeys(yieldmax_posts))
@@ -79,10 +82,9 @@ globe_urls = list(dict.fromkeys(globe_urls))
 print(f"Discovered {len(globe_urls)} GlobeNewswire releases")
 
 # ====================================================
-# STEP 3 — RAW EXTRACTION
+# STEP 3 — CLEAN RAW EXTRACTION
 # ====================================================
 rows = []
-max_table_cols = 0
 
 for url in globe_urls:
     print(f"Processing: {url}")
@@ -91,7 +93,7 @@ for url in globe_urls:
     body_text = soup.get_text(" ", strip=True)
 
     payment_date = extract_date_block(body_text, "Payment Date")
-    ex_date = extract_date_block(body_text, "Ex-Date")
+    ex_date = extract_date_block(body_text, "Ex[- ]?Date")
     record_date = extract_date_block(body_text, "Record Date")
 
     table = soup.find("table")
@@ -99,11 +101,18 @@ for url in globe_urls:
         print("  ⚠ No table found")
         continue
 
-    headers = [th.get_text(strip=True) for th in table.find_all("th")]
-    headers_raw = " | ".join(headers)
+    # Capture header row (even if not <th>)
+    header_row = None
+    for tr in table.find_all("tr"):
+        cells = [normalize_space(td.get_text()) for td in tr.find_all(["th", "td"])]
+        if cells and not any(t in " ".join(cells).upper() for t in TARGET_TICKERS):
+            header_row = cells
+            break
+
+    headers_raw = " | ".join(header_row) if header_row else ""
 
     for tr in table.find_all("tr"):
-        cells = [td.get_text(strip=True) for td in tr.find_all("td")]
+        cells = [normalize_space(td.get_text()) for td in tr.find_all("td")]
         if not cells:
             continue
 
@@ -118,38 +127,32 @@ for url in globe_urls:
         if not ticker:
             continue
 
-        max_table_cols = max(max_table_cols, len(cells))
+        row_raw = " | ".join(cells)
 
-        row = {
+        rows.append({
             "Ticker": ticker,
             "Payment Date": payment_date,
             "Ex-Dividend Date": ex_date,
             "Record Date": record_date,
             "Source URL": url,
-            "Table Headers (raw)": headers_raw
-        }
-
-        for i, val in enumerate(cells, start=1):
-            row[f"Table Col {i}"] = val
-
-        rows.append(row)
+            "Table Headers (raw)": headers_raw,
+            "Table Row (raw)": row_raw
+        })
 
 print(f"Extracted {len(rows)} rows")
 
 # ====================================================
-# WRITE CSV (ALWAYS)
+# WRITE CSV
 # ====================================================
-base_fields = [
+fieldnames = [
     "Ticker",
     "Payment Date",
     "Ex-Dividend Date",
     "Record Date",
     "Source URL",
-    "Table Headers (raw)"
+    "Table Headers (raw)",
+    "Table Row (raw)"
 ]
-
-table_fields = [f"Table Col {i}" for i in range(1, max_table_cols + 1)]
-fieldnames = base_fields + table_fields
 
 with open(OUTPUT_FILE, "w", newline="", encoding="utf-8") as f:
     writer = csv.DictWriter(f, fieldnames=fieldnames)

@@ -28,11 +28,23 @@ def fetch_html(url):
     time.sleep(0.2)
     return r.text
 
-def extract_date_block(text, label):
-    """
-    Extract raw date text like:
-    Payment Date: December 30, 2025
-    """
+def normalize_space(s):
+    return re.sub(r"\s+", " ", s).strip()
+
+def extract_payment_date(text):
+    patterns = [
+        r"Payment Date\s*:\s*([A-Za-z]+\s+\d{1,2},\s+\d{4})",
+        r"Payable Date\s*:\s*([A-Za-z]+\s+\d{1,2},\s+\d{4})",
+        r"Payable\s*:\s*([A-Za-z]+\s+\d{1,2},\s+\d{4})",
+        r"Payment on\s+([A-Za-z]+\s+\d{1,2},\s+\d{4})",
+    ]
+    for p in patterns:
+        m = re.search(p, text, re.IGNORECASE)
+        if m:
+            return m.group(1)
+    return ""
+
+def extract_date(text, label):
     m = re.search(
         rf"{label}\s*:\s*([A-Za-z]+\s+\d{{1,2}},\s+\d{{4}})",
         text,
@@ -40,8 +52,8 @@ def extract_date_block(text, label):
     )
     return m.group(1) if m else ""
 
-def normalize_space(s):
-    return re.sub(r"\s+", " ", s).strip()
+def is_numeric_row(text):
+    return bool(re.search(r"(\$|\%|\d+\.\d+)", text))
 
 # ====================================================
 # STEP 1 — DISCOVER YIELDMAX NEWS POSTS
@@ -82,7 +94,7 @@ globe_urls = list(dict.fromkeys(globe_urls))
 print(f"Discovered {len(globe_urls)} GlobeNewswire releases")
 
 # ====================================================
-# STEP 3 — CLEAN RAW EXTRACTION
+# STEP 3 — RAW EXTRACTION (MULTI-TABLE SAFE)
 # ====================================================
 rows = []
 
@@ -90,54 +102,61 @@ for url in globe_urls:
     print(f"Processing: {url}")
     html = fetch_html(url)
     soup = BeautifulSoup(html, "html.parser")
-    body_text = soup.get_text(" ", strip=True)
 
-    payment_date = extract_date_block(body_text, "Payment Date")
-    ex_date = extract_date_block(body_text, "Ex[- ]?Date")
-    record_date = extract_date_block(body_text, "Record Date")
+    # --- Text ABOVE first table only ---
+    page_text = soup.get_text(" ", strip=True)
+    first_table = soup.find("table")
+    if first_table:
+        pre_table_text = page_text.split(first_table.get_text(" ", strip=True))[0]
+    else:
+        pre_table_text = page_text
 
-    table = soup.find("table")
-    if not table:
-        print("  ⚠ No table found")
+    payment_date = extract_payment_date(pre_table_text)
+    ex_date = extract_date(pre_table_text, "Ex[- ]?Date")
+    record_date = extract_date(pre_table_text, "Record Date")
+
+    tables = soup.find_all("table")
+    if not tables:
         continue
 
-    # Capture header row (even if not <th>)
-    header_row = None
-    for tr in table.find_all("tr"):
-        cells = [normalize_space(td.get_text()) for td in tr.find_all(["th", "td"])]
-        if cells and not any(t in " ".join(cells).upper() for t in TARGET_TICKERS):
-            header_row = cells
-            break
+    last_header_row = ""
 
-    headers_raw = " | ".join(header_row) if header_row else ""
+    for table in tables:
+        for tr in table.find_all("tr"):
+            cells = [normalize_space(td.get_text()) for td in tr.find_all(["th", "td"])]
+            if not cells:
+                continue
 
-    for tr in table.find_all("tr"):
-        cells = [normalize_space(td.get_text()) for td in tr.find_all("td")]
-        if not cells:
-            continue
+            row_text = " ".join(cells)
+            row_text_upper = row_text.upper()
 
-        row_text = " ".join(cells).upper()
+            # Header-like row (non-numeric, descriptive)
+            if (
+                not is_numeric_row(row_text)
+                and any(k in row_text_lower for k in ["distribution", "yield", "frequency", "ticker"])
+            ):
+                last_header_row = " | ".join(cells)
+                continue
 
-        ticker = None
-        for t in TARGET_TICKERS:
-            if t in row_text:
-                ticker = t
-                break
+            # Data row gate
+            ticker = None
+            for t in TARGET_TICKERS:
+                if t in row_text_upper and is_numeric_row(row_text):
+                    ticker = t
+                    break
 
-        if not ticker:
-            continue
+            if not ticker:
+                continue
 
-        row_raw = " | ".join(cells)
-
-        rows.append({
-            "Ticker": ticker,
-            "Payment Date": payment_date,
-            "Ex-Dividend Date": ex_date,
-            "Record Date": record_date,
-            "Source URL": url,
-            "Table Headers (raw)": headers_raw,
-            "Table Row (raw)": row_raw
-        })
+            rows.append({
+                "Ticker": ticker,
+                "Payment Date": payment_date,
+                "Ex-Dividend Date": ex_date,
+                "Record Date": record_date,
+                "Source URL": url,
+                "Table Headers (raw)": last_header_row,
+                "Table Row (raw)": " | ".join(cells)
+            })
 
 print(f"Extracted {len(rows)} rows")
 

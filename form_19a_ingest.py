@@ -103,7 +103,6 @@ for url in globe_urls:
     html = fetch_html(url)
     soup = BeautifulSoup(html, "html.parser")
 
-    # --- Text ABOVE first table only ---
     page_text = soup.get_text(" ", strip=True)
     first_table = soup.find("table")
     if first_table:
@@ -129,8 +128,9 @@ for url in globe_urls:
 
             row_text = " ".join(cells)
             row_text_upper = row_text.upper()
+            row_text_lower = row_text.lower()
 
-            # Header-like row (non-numeric, descriptive)
+            # Header-like row
             if (
                 not is_numeric_row(row_text)
                 and any(k in row_text_lower for k in ["distribution", "yield", "frequency", "ticker"])
